@@ -66,14 +66,12 @@ end
 
 
 function M.update_state(frame)
-    M.state = {
-        threads = {},
-        breakpoints = {}
-    }
-
-    if Previous_Frame_Cache == frame then
+    if M.previous_fram_cache == frame then
         return
     end
+
+    M.state.threads = {}
+    M.state.breakpoints = {}
 
     local lines = split_string_full(frame)
     for _, line in ipairs(lines) do
@@ -96,7 +94,7 @@ function M.update_state(frame)
         end
     end
 
-    Previous_Frame_Cache = frame
+    M.previous_fram_cache = frame
 
     vim.schedule_wrap(M.config.on_state_updated)(M.state)
 end
