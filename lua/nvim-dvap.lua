@@ -1,4 +1,3 @@
--- Main module for the Hello World plugin
 local M = {
     state = {
         threads = {},
@@ -11,7 +10,7 @@ local M = {
     config = {
         on_connected = function() end,
         on_disconnected = function() end,
-        on_state_updated = function() end
+        on_state_updated = function(state) end
     }
 }
 
@@ -98,6 +97,8 @@ function M.update_state(frame)
     end
 
     Previous_Frame_Cache = frame
+
+    vim.schedule_wrap(M.config.on_state_updated)(M.state)
 end
 
 function M.disconnect()
@@ -116,7 +117,7 @@ function M.disconnect()
         --print("WebSocket connection closed gracefully")
     end)
 
-    vim.shedule.wrap(M.config.on_disconnected)()
+    vim.schedule_wrap(M.config.on_disconnected)()
 end
 
 function M.connect(PATH, HOST, PORT)
@@ -127,6 +128,7 @@ function M.connect(PATH, HOST, PORT)
     M.disconnect()
 
     M.client = vim.uv.new_tcp()
+
     if M.client == nil then
         --print("Conenction failed")
         return
@@ -151,7 +153,7 @@ function M.connect(PATH, HOST, PORT)
                 print("Connection closed")
                 M.client:close()
                 M.client = nil
-                vim.shedule.wrap(M.config.on_disconnected)()
+                vim.schedule_wrap(M.config.on_disconnected)()
                 return
             end
 
@@ -162,12 +164,12 @@ function M.connect(PATH, HOST, PORT)
                 if e then
                     if buffer:find("101 Switching Protocols") then
                         handshaked = true
-                        vim.shedule.wrap(M.config.on_connected)()
+                        vim.schedule_wrap(M.config.on_connected)()
                         print("WebSocket Connected to " .. HOST .. ":" .. PORT)
                         buffer = buffer:sub(e + 1)
                     else
                         print("Handshake failed")
-                        vim.shedule.wrap(M.config.on_disconnected)()
+                        vim.schedule_wrap(M.config.on_disconnected)()
                         M.client:close()
                         M.client = nil
                     end
@@ -182,7 +184,7 @@ function M.connect(PATH, HOST, PORT)
                         if frame.opcode == 1 then -- Text frame
                             M.update_state(frame.payload)
                         elseif frame.opcode == 8 then -- Close frame
-                            vim.shedule.wrap(M.config.on_disconnected)()
+                            vim.schedule_wrap(M.config.on_disconnected)()
                             M.client:close()
                             M.client = nil
                         end
@@ -199,4 +201,6 @@ function M.get_state()
     return M.state
 end
 
-return M
+_G.ws_instance = M
+
+return _G.ws_instance
