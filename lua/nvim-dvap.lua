@@ -36,7 +36,6 @@ local function parse_frame(data)
         header_size = 4
     elseif payload_len == 127 then
         if #data < 10 then return nil, data end
-        -- Берем только младшие 4 байта для простоты (до 4ГБ)
         payload_len = bit.lshift(string.byte(data, 7), 24) + bit.lshift(string.byte(data, 8), 16) +
                       bit.lshift(string.byte(data, 9), 8) + string.byte(data, 10)
         header_size = 10
