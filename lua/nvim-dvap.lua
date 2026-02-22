@@ -4,7 +4,7 @@ local M = {
         breakpoints = {}
     },
 
-    previous_fram_cache = "",
+    previous_frame_cache = "",
     client = nil,
 
     config = {
@@ -66,7 +66,7 @@ end
 
 
 function M.update_state(frame)
-    if M.previous_fram_cache == frame then
+    if M.previous_frame_cache == frame then
         return
     end
 
@@ -94,7 +94,7 @@ function M.update_state(frame)
         end
     end
 
-    M.previous_fram_cache = frame
+    M.previous_frame_cache = frame
 
     vim.schedule_wrap(M.config.on_state_updated)(M.state)
 end
@@ -148,7 +148,7 @@ function M.connect(PATH, HOST, PORT)
 
         M.client:read_start(function(err, chunk)
             if err or not chunk then
-                print("Connection closed")
+                -- print("Connection closed")
                 M.client:close()
                 M.client = nil
                 vim.schedule_wrap(M.config.on_disconnected)()
@@ -163,10 +163,10 @@ function M.connect(PATH, HOST, PORT)
                     if buffer:find("101 Switching Protocols") then
                         handshaked = true
                         vim.schedule_wrap(M.config.on_connected)()
-                        print("WebSocket Connected to " .. HOST .. ":" .. PORT)
+                        -- print("WebSocket Connected to " .. HOST .. ":" .. PORT)
                         buffer = buffer:sub(e + 1)
                     else
-                        print("Handshake failed")
+                        -- print("Handshake failed")
                         vim.schedule_wrap(M.config.on_disconnected)()
                         M.client:close()
                         M.client = nil
