@@ -23,6 +23,16 @@ function M.setup(config)
     M.config = config
 end
 
+function M.check()
+    vim.health.start("nvim-dvap report")
+
+    if vim.fn.executable("curl") == 1 then
+        vim.health.ok("curl: found")
+    else
+        vim.health.error("curl: haven't been found")
+    end
+end
+
 local function split_string_full(inputstr, sep)
     sep = sep or "%s"
     local t = {}

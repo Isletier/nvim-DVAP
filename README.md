@@ -9,6 +9,10 @@ WARNING — this implementation is very WIP and partially vibecoded; DON'T use i
 - https://github.com/Isletier/DVAP - adapter for GDB (please, read this one)
 - https://github.com/Isletier/nvim-DVAP-ui - UI part for this plugin
 
+## Dependencies
+
+- `curl`
+
 ## Installation
 
 This is for packer:
