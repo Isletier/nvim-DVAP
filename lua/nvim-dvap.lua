@@ -7,6 +7,10 @@ local M = {
     previous_frame_cache = "",
     client = nil,
 
+    stdout = nil,
+    stdin = nil,
+    chunk_buffer = "",
+
     config = {
         on_connected = function() end,
         on_disconnected = function() end,
@@ -18,37 +22,6 @@ local M = {
 function M.setup(config)
     M.config = config
 end
-
-local function parse_frame(data)
-    if #data < 2 then return nil, data end
-    local b1 = string.byte(data, 1)
-    local b2 = string.byte(data, 2)
-
-    local bit = require("bit")
-
-    local opcode = bit.band(b1, 0x0F)
-    local payload_len = bit.band(b2, 0x7F)
-    local header_size = 2
-
-    if payload_len == 126 then
-        if #data < 4 then return nil, data end
-        payload_len = bit.lshift(string.byte(data, 3), 8) + string.byte(data, 4)
-        header_size = 4
-    elseif payload_len == 127 then
-        if #data < 10 then return nil, data end
-        payload_len = bit.lshift(string.byte(data, 7), 24) + bit.lshift(string.byte(data, 8), 16) +
-                      bit.lshift(string.byte(data, 9), 8) + string.byte(data, 10)
-        header_size = 10
-    end
-
-    if #data < header_size + payload_len then return nil, data end
-
-    local payload = string.sub(data, header_size + 1, header_size + payload_len)
-    local remaining = string.sub(data, header_size + payload_len + 1)
-
-    return { opcode = opcode, payload = payload }, remaining
-end
-
 
 local function split_string_full(inputstr, sep)
     sep = sep or "%s"
@@ -72,7 +45,7 @@ function M.update_state(frame)
     M.state.threads = {}
     M.state.breakpoints = {}
 
-    local lines = split_string_full(frame)
+    local lines = split_string_full(frame, ' ')
     for _, line in ipairs(lines) do
         local occurancies = split_string_full(line, ':')
         if occurancies[1] == "thread" then
@@ -99,98 +72,69 @@ function M.update_state(frame)
 end
 
 function M.disconnect()
-    if not M.client then
-        return
-    end
+    if M.stdout then M.stdout:close() end
+    if M.stderr then M.stderr:close() end
+    if M.client then M.client:close() end
+    if M.client then M.client:kill(15) end
 
-    local close_frame = string.char(0x88, 0x00)
-    M.client:write(close_frame, function(err)
-        if not M.client:is_closing() then
-            M.client:read_stop()
-            M.client:close()
-        end
-
-        M.client = nil
-        --print("WebSocket connection closed gracefully")
-    end)
+    M.client = nil
+    M.stdout = nil
+    M.stderr = nil
+    M.chunk_buffer = ""
+    M.previous_frame_cache = ""
 
     vim.schedule_wrap(M.config.on_disconnected)()
 end
 
-function M.connect(PATH, HOST, PORT)
-    if not HOST and PORT then
-        return
-    end
-
+function M.connect(url)
     M.disconnect()
+    M.stdout = vim.uv.new_pipe(false)
+    M.stderr = vim.uv.new_pipe(false)
 
-    M.client = vim.uv.new_tcp()
+    vim.schedule_wrap(M.config.on_connected)()
+    M.client = vim.uv.spawn("curl", {
+        args = {
+            "-N",
+            "-sS",
+            "-H",
+            "Accept: text/event-stream",
+           url
+        },
+        stdio = { nil, M.stdout, M.stderr },
+    }, function(_, _) M.disconnect() end
+    )
 
-    if M.client == nil then
-        --print("Conenction failed")
-        return
-    end
+    -- 1. Listen to stderr for connection/network errors
+    vim.uv.read_start(M.stderr, function(err, data)
+        if data then
+            vim.schedule(function()
+                print("curl error happend: " .. data)
+            end)
+        end
+    end)
 
-    local buffer = ""
-    local handshaked = false
+    vim.uv.read_start(M.stdout, function(err, chunk)
+        if err or not chunk then
+            M.disconnect()
+            return
+        end
 
-    M.client:connect(HOST, PORT, function(err)
-        if err then return print("Connection error: " .. err) end
+        M.chunk_buffer = M.chunk_buffer .. chunk
+        while true do
+            local start_idx, end_idx = M.chunk_buffer:find("\n\n")
+            if not start_idx then break end
 
-        -- Handshake
-        local key = "dGhlIHNhbXBsZSBub25jZQ=="
-        local req = string.format(
-            "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
-            PATH, HOST, key
-        )
-        M.client:write(req)
+            local full_event = M.chunk_buffer:sub(1, end_idx)
+            M.chunk_buffer = M.chunk_buffer:sub(end_idx + 1)
 
-        M.client:read_start(function(err, chunk)
-            if err or not chunk then
-                -- print("Connection closed")
-                M.client:close()
-                M.client = nil
-                vim.schedule_wrap(M.config.on_disconnected)()
-                return
+            local data_content = full_event:match("data: (.*)\n\n")
+            if not data_content then
+                print("Unexpected event format, disconnecting")
+                M.disconnect()
             end
 
-            buffer = buffer .. chunk
-
-            if not handshaked then
-                local _, e = buffer:find("\r\n\r\n")
-                if e then
-                    if buffer:find("101 Switching Protocols") then
-                        handshaked = true
-                        vim.schedule_wrap(M.config.on_connected)()
-                        -- print("WebSocket Connected to " .. HOST .. ":" .. PORT)
-                        buffer = buffer:sub(e + 1)
-                    else
-                        -- print("Handshake failed")
-                        vim.schedule_wrap(M.config.on_disconnected)()
-                        M.client:close()
-                        M.client = nil
-                    end
-                end
-            end
-
-            if handshaked then
-                while #buffer > 0 do
-                    local frame, remaining = parse_frame(buffer)
-                    if frame then
-                        buffer = remaining
-                        if frame.opcode == 1 then -- Text frame
-                            M.update_state(frame.payload)
-                        elseif frame.opcode == 8 then -- Close frame
-                            vim.schedule_wrap(M.config.on_disconnected)()
-                            M.client:close()
-                            M.client = nil
-                        end
-                    else
-                        break
-                    end
-                end
-            end
-        end)
+            M.update_state(data_content)
+        end
     end)
 end
 
