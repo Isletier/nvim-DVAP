@@ -1,7 +1,8 @@
 local M = {
     state = {
         threads = {},
-        breakpoints = {}
+        breakpoints = {},
+        selected = nil
     },
 
     previous_frame_cache = "",
@@ -72,7 +73,8 @@ function M.update_state(frame)
                 nonconditional = occurancies[6],
                 enabled = occurancies[7]
             }
-        else
+        elseif occurancies[1] == "selected" then
+            M.state.selected = occurancies[2]
         end
     end
 
