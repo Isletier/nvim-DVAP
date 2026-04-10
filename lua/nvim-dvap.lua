@@ -47,37 +47,83 @@ local function split_string_full(inputstr, sep)
     return t
 end
 
+local function validate_and_normalize_path(path_str)
+    if type(path_str) ~= "string" then
+        return nil
+    end
+
+    local abs_path = vim.fs.normalize(vim.fn.fnamemodify(path_str, ":p"))
+
+    local is_readable = vim.uv.fs_access(abs_path, "r")
+    local stat = vim.uv.fs_stat(abs_path)
+    if is_readable and stat and stat.type == "file" then
+        return abs_path
+    end
+
+    return nil
+end
 
 function M.update_state(frame)
     if M.previous_frame_cache == frame then
         return
     end
 
-    M.state.threads = {}
-    M.state.breakpoints = {}
+    local new_state = {}
+    new_state.threads = {}
+    new_state.breakpoints = {}
 
     local lines = split_string_full(frame, ' ')
     for _, line in ipairs(lines) do
         local occurancies = split_string_full(line, ':')
         if occurancies[1] == "thread" then
-            M.state.threads[occurancies[2]] = {
-                file_path = occurancies[3],
-                line = occurancies[4],
-                tid = occurancies[5]
+
+            local file_path = validate_and_normalize_path(occurancies[3])
+            local line_ok, line_nr = pcall(tonumber, occurancies[4])
+            local tid_ok, tid = pcall(tonumber, occurancies[5])
+
+            if not file_path or not line_ok or not tid_ok then
+                local prev_thread = M.state.threads[occurancies[2]]
+                if prev_thread then
+                    print("[DVAP]WARN: invalid thread data or file_path haven't been found, fallback to last valid")
+                    new_state.threads[occurancies[2]] = M.state.threads[occurancies[2]]
+                else
+                    print("[DVAP]WARN: invalid thread data or file_path haven't been found, ignored")
+                end
+
+                goto continue;
+            end
+
+            new_state.threads[occurancies[2]] = {
+                file_path = file_path,
+                line = line_nr,
+                tid = tid
             }
+
         elseif occurancies[1] == "bp" then
-            M.state.breakpoints[occurancies[2]] = {
-                file_path = occurancies[3],
-                line = occurancies[4],
+            local file_path = validate_and_normalize_path(occurancies[3])
+            local line_ok, line_nr = pcall(tonumber, occurancies[4])
+
+
+            if not file_path or not line_ok then
+                print("[DVAP]WARN: invalid breakpoint data, ignored")
+                goto continue;
+            end
+
+            new_state.breakpoints[occurancies[2]] = {
+                file_path = file_path,
+                line = line_nr,
                 type_str = occurancies[5],
-                nonconditional = occurancies[6],
-                enabled = occurancies[7]
+                nonconditional = occurancies[7],
+                enabled = occurancies[8]
             }
         elseif occurancies[1] == "selected" then
-            M.state.selected = occurancies[2]
+            new_state.selected = occurancies[2]
         end
+
+        ::continue::
     end
 
+    M.state = new_state
     M.previous_frame_cache = frame
 
     vim.schedule_wrap(M.config.on_state_updated)(M.state)
