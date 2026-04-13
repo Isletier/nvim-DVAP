@@ -319,6 +319,6 @@ function M.get_state()
     return M.state
 end
 
-_G.ws_instance = M
+_G.dvap_instance = M
 
 return M
