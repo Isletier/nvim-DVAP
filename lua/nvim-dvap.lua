@@ -1,4 +1,39 @@
+---@class DvapThread
+---@field file_path string  Absolute normalized path to the source file
+---@field line     integer  1-based line number
+---@field tid      integer  OS thread ID
+
+---@class DvapBreakpoint
+---@field file_path      string  Absolute normalized path to the source file
+---@field line           integer 1-based line number
+---@field nonconditional boolean True when the breakpoint has no condition, thread, or task filter
+---@field enabled        boolean Whether the breakpoint is currently active
+
+---@class DvapState
+---@field threads     table<integer, DvapThread>      Map of debugger thread num -> thread info
+---@field breakpoints table<integer, DvapBreakpoint>  Map of debugger bp num -> breakpoint info
+---@field selected    integer?                        Debugger thread num of the currently selected thread
+
+---@class DvapConfig
+---@field on_connected     fun()                     Called when the SSE connection is established
+---@field on_disconnected  fun()                     Called when the connection drops or is explicitly closed
+---@field on_state_updated fun(state: DvapState)     Called on every successfully parsed state frame
+
+---@class DvapModule
+---@field state                DvapState
+---@field previous_frame_cache string
+---@field client               userdata?
+---@field stdout               userdata?
+---@field stderr               userdata?
+---@field chunk_buffer         string
+---@field config               DvapConfig
+
+
+local FS = ";;"   -- field separator (within a record)
+local RS = "||"   -- record separator (between records)
+
 local M = {
+    ---@type DvapState
     state = {
         threads = {},
         breakpoints = {},
@@ -6,23 +41,25 @@ local M = {
     },
 
     previous_frame_cache = "",
-    client = nil,
+    client               = nil,
+    stdout               = nil,
+    stderr               = nil,
+    chunk_buffer         = "",
 
-    stdout = nil,
-    stdin = nil,
-    chunk_buffer = "",
-
+    ---@type DvapConfig
     config = {
-        on_connected = function() end,
-        on_disconnected = function() end,
-        on_state_updated = function(state) end
+        on_connected     = function() end,
+        on_disconnected  = function() end,
+        on_state_updated = function(_) end,
     }
 }
 
--- Function to set up the plugin
+
+---@param config DvapConfig
 function M.setup(config)
     M.config = config
 end
+
 
 function M.check()
     vim.health.start("nvim-dvap report")
@@ -30,13 +67,14 @@ function M.check()
     if vim.fn.executable("curl") == 1 then
         vim.health.ok("curl: found")
     else
-        vim.health.error("curl: haven't been found")
+        vim.health.error("curl: not found")
     end
 end
 
-local FS = ";;"   -- field separator (within a record)
-local RS = "||"   -- record separator (between records)
 
+---Returns the absolute normalized path if the file exists and is readable, nil otherwise.
+---@param path_str any
+---@return string?
 local function validate_and_normalize_path(path_str)
     if type(path_str) ~= "string" then
         return nil
@@ -45,7 +83,7 @@ local function validate_and_normalize_path(path_str)
     local abs_path = vim.fs.normalize(vim.fn.fnamemodify(path_str, ":p"))
 
     local is_readable = vim.uv.fs_access(abs_path, "r")
-    local stat = vim.uv.fs_stat(abs_path)
+    local stat        = vim.uv.fs_stat(abs_path)
     if is_readable and stat and stat.type == "file" then
         return abs_path
     end
@@ -53,64 +91,129 @@ local function validate_and_normalize_path(path_str)
     return nil
 end
 
-local function schedule_notify(msg, level, opts)
-    vim.schedule_wrap(vim.notify_once)(msg, level, opts)
+
+---Schedules a one-time vim.notify call. Safe to call from uv callbacks.
+---@param msg   string
+---@param level integer
+local function schedule_notify(msg, level)
+    vim.schedule_wrap(vim.notify_once)(msg, level, {})
 end
 
-function M.parse_thread(fields, len)
+
+---Parses a single thread record from its already-split fields.
+---@param  fields string[]
+---@return integer?    thread_num
+---@return DvapThread?
+function M.parse_thread(fields)
     local thr_num_ok, thread_num = pcall(tonumber, fields[2])
-    if not thr_num_ok or len < 5 then
-        schedule_notify("[DVAP] Invalid thread num field, ignoring", vim.log.levels.WARN, {})
+    if not thr_num_ok or #fields < 5 then
+        schedule_notify("[DVAP] Invalid thread record, ignoring", vim.log.levels.WARN)
         return nil, nil
     end
 
-    local file_path = validate_and_normalize_path(fields[3])
+    local file_path        = validate_and_normalize_path(fields[3])
     local line_ok, line_nr = pcall(tonumber, fields[4])
-    local tid_ok, tid = pcall(tonumber, fields[5])
+    local tid_ok,  tid     = pcall(tonumber, fields[5])
 
     if not file_path or not line_ok or not tid_ok then
+        -- Attempt to keep the last known position for this thread (e.g. it is running)
         local prev_thread = M.state.threads[thread_num]
         if not prev_thread then
-            schedule_notify("[DVAP] Invalid thread data or file_path haven't been found, ignored", vim.log.levels.WARN, {})
+            schedule_notify("[DVAP] Invalid thread data and no previous info, ignoring", vim.log.levels.WARN)
             return nil, nil
         end
 
-        schedule_notify("[DVAP] Invalid thread data or file_path haven't been found, fallback to previous info", vim.log.levels.WARN, {})
-        return thread_num, M.state.threads[thread_num]
+        schedule_notify("[DVAP] Invalid thread data, falling back to previous info", vim.log.levels.WARN)
+        return thread_num, prev_thread
     end
 
-    return thread_num, {
-        file_path = file_path,
-        line = line_nr,
-        tid = tid
-    }
+    ---@type DvapThread
+    local result = { file_path = file_path, line = line_nr --[[@as integer]], tid = tid --[[@as integer]] }
+    return thread_num, result
 end
 
-function M.parse_breakpoint(fields, len)
+
+---Parses a single breakpoint record from its already-split fields.
+---@param  fields string[]
+---@return integer?        br_num
+---@return DvapBreakpoint?
+function M.parse_breakpoint(fields)
     local br_num_ok, br_num = pcall(tonumber, fields[2])
-    if not br_num_ok or len < 8 then
-        schedule_notify("[DVAP] Invalid breakpoint num field, ignoring", vim.log.levels.WARN, {})
+    if not br_num_ok or #fields < 8 then
+        schedule_notify("[DVAP] Invalid breakpoint record, ignoring", vim.log.levels.WARN)
         return nil, nil
     end
 
-    local file_path = validate_and_normalize_path(fields[3])
+    local file_path        = validate_and_normalize_path(fields[3])
     local line_ok, line_nr = pcall(tonumber, fields[4])
-    local nonconditional = fields[7] == "True"
-    local enabled = fields[8] == "True"
+    local nonconditional   = fields[7] == "True"
+    local enabled          = fields[8] == "True"
 
     if not file_path or not line_ok then
-        schedule_notify("[DVAP] Invalid breakpoint data, ignoring", vim.log.levels.WARN, {})
+        schedule_notify("[DVAP] Invalid breakpoint data, ignoring", vim.log.levels.WARN)
         return nil, nil
     end
 
-    return br_num, {
-        file_path = file_path,
-        line = line_nr,
-        nonconditional = nonconditional,
-        enabled = enabled
-    }
+    ---@type DvapBreakpoint
+    local result = { file_path = file_path, line = line_nr --[[@as integer]], nonconditional = nonconditional, enabled = enabled }
+    return br_num, result
 end
 
+
+---Parses a raw SSE data string into a DvapState. Returns nil on any structural error.
+---@param  frame string
+---@return DvapState?
+function M.parse_frame(frame)
+    ---@type DvapState
+    local state = { threads = {}, breakpoints = {}, selected = nil }
+
+    local records = vim.split(frame, RS, { plain = true })
+
+    for _, record in ipairs(records) do
+        if record == "" then goto continue end
+
+        local fields = vim.split(record, FS, { plain = true })
+
+        if #fields < 2 then
+            schedule_notify("[DVAP] Malformed record, dropping frame", vim.log.levels.ERROR)
+            return nil
+        end
+
+        if fields[1] == "thread" then
+            local thr_num, thr = M.parse_thread(fields)
+            if thr_num ~= nil then
+                state.threads[thr_num] = thr
+            end
+
+        elseif fields[1] == "bp" then
+            local br_num, br = M.parse_breakpoint(fields)
+            if br_num ~= nil then
+                state.breakpoints[br_num] = br
+            end
+
+        elseif fields[1] == "selected" then
+            local ok, selected = pcall(tonumber, fields[2])
+            if not ok then
+                schedule_notify("[DVAP] Invalid selected field, dropping frame", vim.log.levels.ERROR)
+                return nil
+            end
+            state.selected = selected
+        end
+
+        ::continue::
+    end
+
+    if state.selected == nil or state.threads[state.selected] == nil then
+        schedule_notify("[DVAP] Selected thread not present in frame, dropping", vim.log.levels.ERROR)
+        return nil
+    end
+
+    return state
+end
+
+
+---Updates internal state from a raw SSE frame string. No-op on duplicate or invalid frames.
+---@param frame string
 function M.update_state(frame)
     if M.previous_frame_cache == frame then
         return
@@ -126,93 +229,54 @@ function M.update_state(frame)
     vim.schedule_wrap(M.config.on_state_updated)(M.state)
 end
 
-function M.parse_frame(frame)
-    local state = {}
-    state.threads = {}
-    state.breakpoints = {}
 
-    local records = vim.split(frame, RS, { plain = true })
-
-    for _, record in ipairs(records) do
-        if record == "" then goto continue end
-
-        local fields = vim.split(record, FS, { plain = true })
-
-        if #fields < 2 then
-            schedule_notify("[DVAP] Validation failed, dropping frame", vim.log.levels.ERROR, {})
-            return nil
-        end
-
-        if fields[1] == "thread" then
-            local thr_num, thr = M.parse_thread(fields, #fields)
-            if thr_num ~= nil then
-                state.threads[thr_num] = thr
-            end
-
-        elseif fields[1] == "bp" then
-            local br_num, br = M.parse_breakpoint(fields, #fields)
-            if br_num ~= nil then
-                state.breakpoints[br_num] = br
-            end
-
-        elseif fields[1] == "selected" then
-            local ok, selected = pcall(tonumber, fields[2])
-            if not ok then
-                schedule_notify("[DVAP] invalid selected data, dropping frame", vim.log.levels.ERROR, {})
-                return nil
-            end
-            state.selected = selected
-        end
-
-        ::continue::
-    end
-
-    if state.threads[state.selected] == nil then
-        schedule_notify("[DVAP] Selected thread info not presented, dropping frame", vim.log.levels.ERROR, {})
-        return nil
-    end
-
-    return state
-end
-
+---Closes the current curl connection and resets all transport state.
 function M.disconnect()
-    if M.stdout then M.stdout:close() end
-    if M.stderr then M.stderr:close() end
-    if M.client then M.client:close() end
+    -- Kill the process before closing pipes so the handle is still valid.
     if M.client then M.client:kill(15) end
+    if M.stdout  then M.stdout:close()  end
+    if M.stderr  then M.stderr:close()  end
+    if M.client  then M.client:close()  end
 
-    M.client = nil
-    M.stdout = nil
-    M.stderr = nil
-    M.chunk_buffer = ""
+    M.client               = nil
+    M.stdout               = nil
+    M.stderr               = nil
+    M.chunk_buffer         = ""
     M.previous_frame_cache = ""
 
     vim.schedule_wrap(M.config.on_disconnected)()
 end
 
+
+---Connects to a DVAP SSE endpoint. Disconnects any existing connection first.
+---@param url string  Full URL, e.g. "127.0.0.1:9000/events"
 function M.connect(url)
     M.disconnect()
+
     M.stdout = vim.uv.new_pipe(false)
     M.stderr = vim.uv.new_pipe(false)
 
-    vim.schedule_wrap(M.config.on_connected)()
+    ---@diagnostic disable-next-line: missing-fields
     M.client = vim.uv.spawn("curl", {
-        args = {
-            "-N",
-            "-sS",
-            "-H",
-            "Accept: text/event-stream",
-           url
-        },
+        args  = { "-N", "-sS", "-H", "Accept: text/event-stream", url },
         stdio = { nil, M.stdout, M.stderr },
-    }, function(_, _) M.disconnect() end
-    )
+    }, function(_, _) M.disconnect() end)
 
-    -- 1. Listen to stderr for connection/network errors
-    vim.uv.read_start(M.stderr, function(err, data)
+    if not M.client then
+        schedule_notify("[DVAP] Failed to spawn curl — is it installed?", vim.log.levels.ERROR)
+        M.stdout:close()
+        M.stderr:close()
+        M.stdout = nil
+        M.stderr = nil
+        return
+    end
+
+    vim.schedule_wrap(M.config.on_connected)()
+
+    vim.uv.read_start(M.stderr, function(_, data)
         if data then
             vim.schedule(function()
-                print("curl error happend: " .. data)
+                vim.notify("[DVAP] curl: " .. data, vim.log.levels.ERROR, {})
             end)
         end
     end)
@@ -224,17 +288,21 @@ function M.connect(url)
         end
 
         M.chunk_buffer = M.chunk_buffer .. chunk
+
         while true do
-            local start_idx, end_idx = M.chunk_buffer:find("\n\n")
-            if not start_idx then break end
+            local _, end_idx = M.chunk_buffer:find("\n\n")
+            if not end_idx then break end
 
             local full_event = M.chunk_buffer:sub(1, end_idx)
-            M.chunk_buffer = M.chunk_buffer:sub(end_idx + 1)
+            M.chunk_buffer   = M.chunk_buffer:sub(end_idx + 1)
 
             local data_content = full_event:match("data: (.*)\n\n")
             if not data_content then
-                print("Unexpected event format, disconnecting")
+                vim.schedule(function()
+                    vim.notify("[DVAP] Unexpected SSE frame format, disconnecting", vim.log.levels.ERROR, {})
+                end)
                 M.disconnect()
+                return
             end
 
             M.update_state(data_content)
@@ -242,6 +310,9 @@ function M.connect(url)
     end)
 end
 
+
+---Returns the last successfully parsed state.
+---@return DvapState
 function M.get_state()
     return M.state
 end
