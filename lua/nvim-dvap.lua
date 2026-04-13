@@ -139,15 +139,15 @@ end
 ---@return DvapBreakpoint?
 function M.parse_breakpoint(fields)
     local br_num = tonumber(fields[2])
-    if not br_num or #fields < 8 then
+    if not br_num or #fields < 6 then
         schedule_notify("[DVAP] Invalid breakpoint record, ignoring", vim.log.levels.WARN)
         return nil, nil
     end
 
     local file_path      = validate_and_normalize_path(fields[3])
     local line_nr        = tonumber(fields[4])
-    local nonconditional = fields[7] == "True"
-    local enabled        = fields[8] == "True"
+    local nonconditional = fields[5] == "True"
+    local enabled        = fields[6] == "True"
 
     if not file_path or not line_nr then
         schedule_notify("[DVAP] Invalid breakpoint data, ignoring", vim.log.levels.WARN)
@@ -321,4 +321,4 @@ end
 
 _G.ws_instance = M
 
-return _G.ws_instance
+return M
