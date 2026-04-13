@@ -57,7 +57,7 @@ local M = {
 
 ---@param config DvapConfig
 function M.setup(config)
-    M.config = config
+    M.config = vim.tbl_deep_extend("force", M.config, config)
 end
 
 
@@ -105,17 +105,17 @@ end
 ---@return integer?    thread_num
 ---@return DvapThread?
 function M.parse_thread(fields)
-    local thr_num_ok, thread_num = pcall(tonumber, fields[2])
-    if not thr_num_ok or #fields < 5 then
+    local thread_num = tonumber(fields[2])
+    if not thread_num or #fields < 5 then
         schedule_notify("[DVAP] Invalid thread record, ignoring", vim.log.levels.WARN)
         return nil, nil
     end
 
-    local file_path        = validate_and_normalize_path(fields[3])
-    local line_ok, line_nr = pcall(tonumber, fields[4])
-    local tid_ok,  tid     = pcall(tonumber, fields[5])
+    local file_path = validate_and_normalize_path(fields[3])
+    local line_nr   = tonumber(fields[4])
+    local tid       = tonumber(fields[5])
 
-    if not file_path or not line_ok or not tid_ok then
+    if not file_path or not line_nr or not tid then
         -- Attempt to keep the last known position for this thread (e.g. it is running)
         local prev_thread = M.state.threads[thread_num]
         if not prev_thread then
@@ -138,18 +138,18 @@ end
 ---@return integer?        br_num
 ---@return DvapBreakpoint?
 function M.parse_breakpoint(fields)
-    local br_num_ok, br_num = pcall(tonumber, fields[2])
-    if not br_num_ok or #fields < 8 then
+    local br_num = tonumber(fields[2])
+    if not br_num or #fields < 8 then
         schedule_notify("[DVAP] Invalid breakpoint record, ignoring", vim.log.levels.WARN)
         return nil, nil
     end
 
-    local file_path        = validate_and_normalize_path(fields[3])
-    local line_ok, line_nr = pcall(tonumber, fields[4])
-    local nonconditional   = fields[7] == "True"
-    local enabled          = fields[8] == "True"
+    local file_path      = validate_and_normalize_path(fields[3])
+    local line_nr        = tonumber(fields[4])
+    local nonconditional = fields[7] == "True"
+    local enabled        = fields[8] == "True"
 
-    if not file_path or not line_ok then
+    if not file_path or not line_nr then
         schedule_notify("[DVAP] Invalid breakpoint data, ignoring", vim.log.levels.WARN)
         return nil, nil
     end
@@ -192,8 +192,8 @@ function M.parse_frame(frame)
             end
 
         elseif fields[1] == "selected" then
-            local ok, selected = pcall(tonumber, fields[2])
-            if not ok then
+            local selected = tonumber(fields[2])
+            if not selected then
                 schedule_notify("[DVAP] Invalid selected field, dropping frame", vim.log.levels.ERROR)
                 return nil
             end
@@ -232,11 +232,13 @@ end
 
 ---Closes the current curl connection and resets all transport state.
 function M.disconnect()
+    if not M.client then return end  -- guard against double-disconnect from exit+EOF callbacks
+
     -- Kill the process before closing pipes so the handle is still valid.
-    if M.client then M.client:kill(15) end
-    if M.stdout  then M.stdout:close()  end
-    if M.stderr  then M.stderr:close()  end
-    if M.client  then M.client:close()  end
+    M.client:kill(15)
+    if M.stdout then M.stdout:close() end
+    if M.stderr then M.stderr:close() end
+    M.client:close()
 
     M.client               = nil
     M.stdout               = nil
