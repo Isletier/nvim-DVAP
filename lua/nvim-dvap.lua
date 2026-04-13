@@ -34,18 +34,8 @@ function M.check()
     end
 end
 
-local function split_string_full(inputstr, sep)
-    sep = sep or "%s"
-    local t = {}
-    local i = 1
-
-    for str in string.gmatch(inputstr, "([^"..sep.."]*)("..sep.."?)") do
-        t[i] = str
-        i = i + 1
-    end
-
-    return i, t
-end
+local FS = ";;"   -- field separator (within a record)
+local RS = "||"   -- record separator (between records)
 
 local function validate_and_normalize_path(path_str)
     if type(path_str) ~= "string" then
@@ -67,16 +57,16 @@ local function schedule_notify(msg, level, opts)
     vim.schedule_wrap(vim.notify_once)(msg, level, opts)
 end
 
-function M.parse_thread(occurancies, len)
-    local thr_num_ok, thread_num = pcall(tonumber, occurancies[2])
-    if not thr_num_ok then
+function M.parse_thread(fields, len)
+    local thr_num_ok, thread_num = pcall(tonumber, fields[2])
+    if not thr_num_ok or len < 5 then
         schedule_notify("[DVAP] Invalid thread num field, ignoring", vim.log.levels.WARN, {})
         return nil, nil
     end
 
-    local file_path = validate_and_normalize_path(occurancies[3])
-    local line_ok, line_nr = pcall(tonumber, occurancies[4])
-    local tid_ok, tid = pcall(tonumber, occurancies[5])
+    local file_path = validate_and_normalize_path(fields[3])
+    local line_ok, line_nr = pcall(tonumber, fields[4])
+    local tid_ok, tid = pcall(tonumber, fields[5])
 
     if not file_path or not line_ok or not tid_ok then
         local prev_thread = M.state.threads[thread_num]
@@ -96,17 +86,17 @@ function M.parse_thread(occurancies, len)
     }
 end
 
-function M.parse_breakpoint(occurancies, len)
-    local br_num_ok, br_num = pcall(tonumber, occurancies[2])
-    if not br_num_ok then
+function M.parse_breakpoint(fields, len)
+    local br_num_ok, br_num = pcall(tonumber, fields[2])
+    if not br_num_ok or len < 8 then
         schedule_notify("[DVAP] Invalid breakpoint num field, ignoring", vim.log.levels.WARN, {})
         return nil, nil
     end
 
-    local file_path = validate_and_normalize_path(occurancies[3])
-    local line_ok, line_nr = pcall(tonumber, occurancies[4])
-    local nonconditional = occurancies[7] == "True"
-    local enabled = occurancies[8] == "True"
+    local file_path = validate_and_normalize_path(fields[3])
+    local line_ok, line_nr = pcall(tonumber, fields[4])
+    local nonconditional = fields[7] == "True"
+    local enabled = fields[8] == "True"
 
     if not file_path or not line_ok then
         schedule_notify("[DVAP] Invalid breakpoint data, ignoring", vim.log.levels.WARN, {})
@@ -141,36 +131,40 @@ function M.parse_frame(frame)
     state.threads = {}
     state.breakpoints = {}
 
-    local _, lines = split_string_full(frame, ' ')
+    local records = vim.split(frame, RS, { plain = true })
 
-    for _, line in ipairs(lines) do
-        local num, occurancies = split_string_full(line, ':')
+    for _, record in ipairs(records) do
+        if record == "" then goto continue end
 
-        if num < 2 then
+        local fields = vim.split(record, FS, { plain = true })
+
+        if #fields < 2 then
             schedule_notify("[DVAP] Validation failed, dropping frame", vim.log.levels.ERROR, {})
             return nil
         end
 
-        if occurancies[1] == "thread" then
-            local thr_num, thr = M.parse_thread(occurancies, num)
+        if fields[1] == "thread" then
+            local thr_num, thr = M.parse_thread(fields, #fields)
             if thr_num ~= nil then
                 state.threads[thr_num] = thr
             end
 
-        elseif occurancies[1] == "bp" then
-            local br_num, br = M.parse_breakpoint(occurancies, num)
+        elseif fields[1] == "bp" then
+            local br_num, br = M.parse_breakpoint(fields, #fields)
             if br_num ~= nil then
                 state.breakpoints[br_num] = br
             end
 
-        elseif occurancies[1] == "selected" then
-            local ok, selected = pcall(tonumber, occurancies[2])
+        elseif fields[1] == "selected" then
+            local ok, selected = pcall(tonumber, fields[2])
             if not ok then
                 schedule_notify("[DVAP] invalid selected data, dropping frame", vim.log.levels.ERROR, {})
-                return
+                return nil
             end
             state.selected = selected
         end
+
+        ::continue::
     end
 
     if state.threads[state.selected] == nil then
