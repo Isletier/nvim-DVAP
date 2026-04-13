@@ -44,7 +44,7 @@ local function split_string_full(inputstr, sep)
         i = i + 1
     end
 
-    return t
+    return i, t
 end
 
 local function validate_and_normalize_path(path_str)
@@ -63,70 +63,122 @@ local function validate_and_normalize_path(path_str)
     return nil
 end
 
+local function schedule_notify(msg, level, opts)
+    vim.schedule_wrap(vim.notify_once)(msg, level, opts)
+end
+
+function M.parse_thread(occurancies, len)
+    local thr_num_ok, thread_num = pcall(tonumber, occurancies[2])
+    if not thr_num_ok then
+        schedule_notify("[DVAP] Invalid thread num field, ignoring", vim.log.levels.WARN, {})
+        return nil, nil
+    end
+
+    local file_path = validate_and_normalize_path(occurancies[3])
+    local line_ok, line_nr = pcall(tonumber, occurancies[4])
+    local tid_ok, tid = pcall(tonumber, occurancies[5])
+
+    if not file_path or not line_ok or not tid_ok then
+        local prev_thread = M.state.threads[thread_num]
+        if not prev_thread then
+            schedule_notify("[DVAP] Invalid thread data or file_path haven't been found, ignored", vim.log.levels.WARN, {})
+            return nil, nil
+        end
+
+        schedule_notify("[DVAP] Invalid thread data or file_path haven't been found, fallback to previous info", vim.log.levels.WARN, {})
+        return thread_num, M.state.threads[thread_num]
+    end
+
+    return thread_num, {
+        file_path = file_path,
+        line = line_nr,
+        tid = tid
+    }
+end
+
+function M.parse_breakpoint(occurancies, len)
+    local br_num_ok, br_num = pcall(tonumber, occurancies[2])
+    if not br_num_ok then
+        schedule_notify("[DVAP] Invalid breakpoint num field, ignoring", vim.log.levels.WARN, {})
+        return nil, nil
+    end
+
+    local file_path = validate_and_normalize_path(occurancies[3])
+    local line_ok, line_nr = pcall(tonumber, occurancies[4])
+    local nonconditional = occurancies[7] == "True"
+    local enabled = occurancies[8] == "True"
+
+    if not file_path or not line_ok then
+        schedule_notify("[DVAP] Invalid breakpoint data, ignoring", vim.log.levels.WARN, {})
+        return nil, nil
+    end
+
+    return br_num, {
+        file_path = file_path,
+        line = line_nr,
+        nonconditional = nonconditional,
+        enabled = enabled
+    }
+end
+
 function M.update_state(frame)
     if M.previous_frame_cache == frame then
         return
     end
-
-    local new_state = {}
-    new_state.threads = {}
-    new_state.breakpoints = {}
-
-    local lines = split_string_full(frame, ' ')
-    for _, line in ipairs(lines) do
-        local occurancies = split_string_full(line, ':')
-        if occurancies[1] == "thread" then
-
-            local file_path = validate_and_normalize_path(occurancies[3])
-            local line_ok, line_nr = pcall(tonumber, occurancies[4])
-            local tid_ok, tid = pcall(tonumber, occurancies[5])
-
-            if not file_path or not line_ok or not tid_ok then
-                local prev_thread = M.state.threads[occurancies[2]]
-                if prev_thread then
-                    print("[DVAP]WARN: invalid thread data or file_path haven't been found, fallback to last valid")
-                    new_state.threads[occurancies[2]] = M.state.threads[occurancies[2]]
-                else
-                    print("[DVAP]WARN: invalid thread data or file_path haven't been found, ignored")
-                end
-
-                goto continue;
-            end
-
-            new_state.threads[occurancies[2]] = {
-                file_path = file_path,
-                line = line_nr,
-                tid = tid
-            }
-
-        elseif occurancies[1] == "bp" then
-            local file_path = validate_and_normalize_path(occurancies[3])
-            local line_ok, line_nr = pcall(tonumber, occurancies[4])
-
-
-            if not file_path or not line_ok then
-                print("[DVAP]WARN: invalid breakpoint data, ignored")
-                goto continue;
-            end
-
-            new_state.breakpoints[occurancies[2]] = {
-                file_path = file_path,
-                line = line_nr,
-                type_str = occurancies[5],
-                nonconditional = occurancies[7],
-                enabled = occurancies[8]
-            }
-        elseif occurancies[1] == "selected" then
-            new_state.selected = occurancies[2]
-        end
-
-        ::continue::
-    end
-
-    M.state = new_state
     M.previous_frame_cache = frame
 
+    local state = M.parse_frame(frame)
+    if state == nil then
+        return
+    end
+
+    M.state = state
     vim.schedule_wrap(M.config.on_state_updated)(M.state)
+end
+
+function M.parse_frame(frame)
+    local state = {}
+    state.threads = {}
+    state.breakpoints = {}
+
+    local _, lines = split_string_full(frame, ' ')
+
+    for _, line in ipairs(lines) do
+        local num, occurancies = split_string_full(line, ':')
+
+        if num < 2 then
+            schedule_notify("[DVAP] Validation failed, dropping frame", vim.log.levels.ERROR, {})
+            return nil
+        end
+
+        if occurancies[1] == "thread" then
+            local thr_num, thr = M.parse_thread(occurancies, num)
+            if thr_num ~= nil then
+                state.threads[thr_num] = thr
+            end
+
+        elseif occurancies[1] == "bp" then
+            local br_num, br = M.parse_breakpoint(occurancies, num)
+            if br_num ~= nil then
+                state.breakpoints[br_num] = br
+            end
+
+        elseif occurancies[1] == "selected" then
+            local ok, selected = pcall(tonumber, occurancies[2])
+            if not ok then
+                schedule_notify("[DVAP] invalid selected data, dropping frame", vim.log.levels.ERROR, {})
+                return
+            end
+            state.selected = selected
+        end
+    end
+
+    if state.threads[state.selected] == nil then
+        schedule_notify("[DVAP] Selected thread info not presented, dropping frame", vim.log.levels.ERROR, {})
+        return nil
+    end
+
+    return state
 end
 
 function M.disconnect()
