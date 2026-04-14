@@ -203,7 +203,9 @@ function M.parse_frame(frame)
         ::continue::
     end
 
-    if state.selected == nil or state.threads[state.selected] == nil then
+    local selected_valid = (state.selected == nil and #state.threads == 0) or (state.selected ~= nil and state.threads[state.selected] ~= nil)
+
+    if not selected_valid then
         schedule_notify("[DVAP] Selected thread not present in frame, dropping", vim.log.levels.ERROR)
         return nil
     end
