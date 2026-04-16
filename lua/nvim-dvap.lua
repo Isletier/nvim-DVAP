@@ -1,8 +1,8 @@
 ---@class DvapThread
 ---@field file_path string  Absolute normalized path to the source file
----@field line     integer  1-based line number
----@field tid      integer  OS thread ID
-
+---@field line      integer 1-based line number
+---@field tid       integer OS thread ID
+---
 ---@class DvapBreakpoint
 ---@field file_path      string  Absolute normalized path to the source file
 ---@field line           integer 1-based line number
@@ -10,9 +10,9 @@
 ---@field enabled        boolean Whether the breakpoint is currently active
 
 ---@class DvapState
----@field threads     table<integer, DvapThread>      Map of debugger thread num -> thread info
+---@field threads     table<string, DvapThread> Map of debugger thread num -> thread info
 ---@field breakpoints table<integer, DvapBreakpoint>  Map of debugger bp num -> breakpoint info
----@field selected    integer?                        Debugger thread num of the currently selected thread
+---@field selected    string?                   Debugger thread num of the currently selected thread
 
 ---@class DvapConfig
 ---@field on_connected     fun()                     Called when the SSE connection is established
@@ -102,18 +102,26 @@ end
 
 ---Parses a single thread record from its already-split fields.
 ---@param  fields string[]
----@return integer?    thread_num
+---@return string?
 ---@return DvapThread?
 function M.parse_thread(fields)
     local thread_num = tonumber(fields[2])
-    if not thread_num or #fields < 5 then
+    if not thread_num or #fields < 6 then
         schedule_notify("[DVAP] Invalid thread record, ignoring", vim.log.levels.WARN)
         return nil, nil
     end
 
-    local file_path = validate_and_normalize_path(fields[3])
-    local line_nr   = tonumber(fields[4])
-    local tid       = tonumber(fields[5])
+    local type_str = fields[3]
+    if type_str == "" then
+        schedule_notify("[DVAP] Invalid thread record, ignoring", vim.log.levels.WARN)
+        return nil, nil
+    end
+
+    local thr_id = thread_num .. '|' .. type_str
+
+    local file_path = validate_and_normalize_path(fields[4])
+    local line_nr   = tonumber(fields[5])
+    local tid       = tonumber(fields[6])
 
     if not file_path or not line_nr or not tid then
         -- Attempt to keep the last known position for this thread (e.g. it is running)
@@ -124,12 +132,18 @@ function M.parse_thread(fields)
         end
 
         schedule_notify("[DVAP] Invalid thread data, falling back to previous info", vim.log.levels.WARN)
-        return thread_num, prev_thread
+        return thr_id, prev_thread
     end
 
     ---@type DvapThread
-    local result = { file_path = file_path, line = line_nr --[[@as integer]], tid = tid --[[@as integer]] }
-    return thread_num, result
+    local result = {
+        file_path = file_path,
+        type_str = type_str,
+        line = line_nr --[[@as integer]],
+        tid = tid --[[@as integer]]
+    }
+
+    return thr_id, result
 end
 
 
@@ -174,15 +188,15 @@ function M.parse_frame(frame)
 
         local fields = vim.split(record, FS, { plain = true })
 
-        if #fields < 2 then
+        if #fields < 3 then
             schedule_notify("[DVAP] Malformed record, dropping frame", vim.log.levels.ERROR)
             return nil
         end
 
         if fields[1] == "thread" then
-            local thr_num, thr = M.parse_thread(fields)
-            if thr_num ~= nil then
-                state.threads[thr_num] = thr
+            local thr_id, thr = M.parse_thread(fields)
+            if thr_id ~= nil then
+                state.threads[thr_id] = thr
             end
 
         elseif fields[1] == "bp" then
@@ -192,12 +206,14 @@ function M.parse_frame(frame)
             end
 
         elseif fields[1] == "selected" then
-            local selected = tonumber(fields[2])
-            if not selected then
+            local id = tonumber(fields[2])
+            local type_str = fields[3]
+            if not id or type_str == "" then
                 schedule_notify("[DVAP] Invalid selected field, dropping frame", vim.log.levels.ERROR)
                 return nil
             end
-            state.selected = selected
+
+            state.selected = fields[2] .. "|" .. type_str
         end
 
         ::continue::
