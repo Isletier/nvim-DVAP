@@ -125,14 +125,14 @@ function M.parse_thread(fields)
 
     if not file_path or not line_nr or not tid then
         -- Attempt to keep the last known position for this thread (e.g. it is running)
-        local prev_thread = M.state.threads[thread_num]
+        local prev_thread = M.state.threads[thr_id]
         if not prev_thread then
             schedule_notify("[DVAP] Invalid thread data and no previous info, ignoring", vim.log.levels.WARN)
             return nil, nil
         end
 
         schedule_notify("[DVAP] Invalid thread data, falling back to previous info", vim.log.levels.WARN)
-        return thr_id, prev_thread
+        return thr_id, vim.tbl_extend("force", prev_thread, { lost = true })
     end
 
     ---@type DvapThread
