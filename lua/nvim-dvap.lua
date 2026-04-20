@@ -56,6 +56,8 @@ local M = {
         selected = nil
     },
 
+    started = false,
+
     previous_frame_cache = "",
     client               = nil,
     stdout               = nil,
@@ -301,6 +303,7 @@ function M.disconnect()
     M.stderr               = nil
     M.chunk_buffer         = ""
     M.previous_frame_cache = ""
+    M.started = false
 
     vim.schedule_wrap(M.config.on_disconnected)()
 end
@@ -366,18 +369,19 @@ function M.connect(url)
     end
 
     M.reconnect_url = url
-    vim.schedule_wrap(M.config.on_connected)()
-    schedule_notify("[DVAP] Connected to " .. url, vim.log.levels.INFO)
-
     vim.uv.read_start(M.stderr, function(_, data)
-        if data then
-            vim.schedule(function()
-                schedule_notify("[DVAP] curl: " .. data, vim.log.levels.ERROR)
-            end)
+        if data and M.config.reconnect_interval == 0 then
+            schedule_notify("[DVAP] curl: " .. data, vim.log.levels.ERROR )
         end
     end)
 
     vim.uv.read_start(M.stdout, function(err, chunk)
+        if not M.started then
+            vim.schedule_wrap(M.config.on_connected)()
+            schedule_notify("[DVAP] Connected to " .. url, vim.log.levels.INFO)
+            M.started = true
+        end
+
         if err then
             schedule_notify("[DVAP] Error while reading network data: " .. tostring(err) .. ", disconnecting",
                 vim.log.levels.WARN)
